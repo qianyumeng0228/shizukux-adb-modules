@@ -91,8 +91,9 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
 ]}
 ```
 
-索引里已没有的 ZIP 仍会列出，此时 `id`/`version` 为 `null`、`inCatalog` 为 `false`（孤儿文件）。
-归属判定用最长 id 前缀匹配，避免 `a.b` 把 `a.bc-1.0.zip` 误判成自己的版本。
+索引里已没有的 ZIP 仍会列出，并按自己的 `<id>-<version>.zip` 文件名解析出归属，只是 `inCatalog`
+为 `false`；只有文件名不合规时 `id`/`version` 才是 `null`。
+归属判定先用最长 id 前缀匹配（避免 `a.b` 把 `a.bc-1.0.zip` 误判成自己的版本），匹配不到再退回文件名解析。
 
 ### `POST /unpublish`（管理端）
 
@@ -105,8 +106,11 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
 
 - 只给 `id`：整模块下架——移除 `modules.json` 条目并删除 `modules/<id>-*.zip` 全部文件，
   返回 `{"ok":true,"id":…,"deletedFiles":N,"indexRemoved":true}`。
-- 再给 `version`：只删这一个 ZIP；若它正是索引当前版本，索引条目同时移除（模块即从商店消失），
-  返回 `{"ok":true,"id":…,"version":…,"fileRemoved":true,"indexRemoved":false}`。
+- 再给 `version`：只删这一个 ZIP，返回里用 `indexAction` 说明目录发生了什么：
+  - `kept`：删的是历史版本，条目原样保留（`{"fileRemoved":true,"indexAction":"kept"}`）；
+  - `rolledBack`：删的是当前上架版本，条目自动回退到仓库里剩下的最高版本，同时重算
+    `downloadUrl`/`fallbackUrl`/`sizeBytes`/`sha256`，返回 `{"indexAction":"rolledBack","rolledBackTo":"1.0.2"}`；
+  - `removed`：删的是最后一版，条目被移除。
 - 两者都不存在时返回 404；索引更新失败时返回 502，但已删文件不会回滚（Git 历史可恢复）。
 
 ### `POST /edit`（管理端）

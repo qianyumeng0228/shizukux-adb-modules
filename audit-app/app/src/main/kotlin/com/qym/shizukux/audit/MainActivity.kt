@@ -436,7 +436,7 @@ private fun PublishedTab(vm: AuditViewModel) {
                     if (wholeModule) {
                         "会移除索引条目并删除该模块的全部 ZIP，商店卡片与下载链接立即失效。"
                     } else {
-                        "只删除 modules/ 里的这个 ZIP。若它正是当前上架版本，索引条目会一并移除，模块将从商店消失。"
+                        "只删除 modules/ 里的这个 ZIP，其他版本与目录条目都保留。若它正是当前上架版本，商店会自动回退到剩下的最高版本；只剩这一版时条目才会移除。"
                     }
                 )
             },

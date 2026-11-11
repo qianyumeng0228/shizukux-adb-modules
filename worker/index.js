@@ -398,7 +398,11 @@ async function handleReview(request, env) {
 
 // -- published module management ------------------------------------------
 
-/** Lists every ZIP under modules/, resolved against the ids currently in the index. */
+/**
+ * Lists every ZIP under modules/. Ids come from the catalog first; a file the catalog no
+ * longer mentions still resolves through its own `<id>-<version>.zip` name so it stays
+ * manageable instead of showing up as an ownerless orphan.
+ */
 async function handleModuleFiles(request, env) {
   if (!isAdmin(request, env)) return json({ ok: false, error: 'unauthorized' }, 401);
   const listing = await ghListDir(env, 'modules');
@@ -413,10 +417,15 @@ async function handleModuleFiles(request, env) {
     const owner = ids
       .filter(candidate => item.name.startsWith(`${candidate}-`))
       .sort((a, b) => b.length - a.length)[0] || null;
+    const derived = owner ? null : deriveModuleFromFileName(item.name);
+    const id = owner || (derived ? derived.id : null);
+    const version = owner
+      ? item.name.slice(owner.length + 1).replace(/\.zip$/i, '')
+      : (derived ? derived.version : null);
     files.push({
       name: item.name,
-      id: owner,
-      version: owner ? item.name.slice(owner.length + 1).replace(/\.zip$/i, '') : null,
+      id,
+      version,
       sizeBytes: item.size,
       inCatalog: Boolean(owner)
     });
@@ -424,10 +433,23 @@ async function handleModuleFiles(request, env) {
   return json({ ok: true, count: files.length, files });
 }
 
+/** Splits `shizukux.recorder-1.0.3.zip` into its id and version when the catalog is silent. */
+function deriveModuleFromFileName(name) {
+  const stem = name.replace(/\.zip$/i, '');
+  const cut = stem.lastIndexOf('-');
+  if (cut <= 0) return null;
+  const id = stem.slice(0, cut);
+  const version = stem.slice(cut + 1);
+  if (!/^[A-Za-z][A-Za-z0-9._-]{1,63}$/.test(id)) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(version)) return null;
+  return { id, version };
+}
+
 /**
  * Removes a published module, or one of its versions.
  * `{id}`           → drop the catalog entry and every `modules/<id>-*.zip`
- * `{id, version}`  → delete that ZIP; if it is the catalog's version the entry goes too
+ * `{id, version}`  → delete that ZIP only; deleting the live version steps the entry back to
+ *                    the newest ZIP left in the repo, and drops the entry only when none is left
  */
 async function handleUnpublish(request, env) {
   if (!isAdmin(request, env)) return json({ ok: false, error: 'unauthorized' }, 401);
@@ -456,16 +478,45 @@ async function handleUnpublish(request, env) {
       `modules/${id}-${version}.zip`,
       `module: unpublish ${id} v${version}`
     );
-    let indexRemoved = false;
-    if (current && String(current.version) === version) {
-      const result = await removeFromIndex(env, id);
-      if (!result.ok) {
-        return json({ ok: false, error: `file removed but index update failed: ${result.error}` }, 502);
-      }
-      indexRemoved = true;
+
+    // Deleting a history version must not touch the catalog entry at all.
+    if (!current || String(current.version) !== version) {
+      if (!fileRemoved) return json({ ok: false, error: 'version not found' }, 404);
+      return json({ ok: true, id, version, fileRemoved, indexAction: 'kept', reason });
     }
-    if (!fileRemoved && !indexRemoved) return json({ ok: false, error: 'version not found' }, 404);
-    return json({ ok: true, id, version, fileRemoved, indexRemoved, reason });
+
+    // Deleting the live version steps the entry back to the newest ZIP still in the repo,
+    // so the module keeps its listing instead of vanishing from the store.
+    const remaining = (await listModuleFiles(env, id))
+      .map(name => name.slice(id.length + 1).replace(/\.zip$/i, ''))
+      .filter(candidate => candidate !== version);
+    const fallbackVersion = remaining.sort(compareVersions).pop() || null;
+
+    if (fallbackVersion) {
+      const entry = await describeCatalogVersion(env, id, fallbackVersion, current);
+      if (!entry) {
+        return json({ ok: false, error: `file removed but ${fallbackVersion} could not be read` }, 502);
+      }
+      const result = await replaceIndexEntry(env, id, entry);
+      if (!result.ok) {
+        return json({ ok: false, error: `file removed but index rollback failed: ${result.error}` }, 502);
+      }
+      return json({
+        ok: true,
+        id,
+        version,
+        fileRemoved,
+        indexAction: 'rolledBack',
+        rolledBackTo: fallbackVersion,
+        reason
+      });
+    }
+
+    const result = await removeFromIndex(env, id);
+    if (!result.ok) {
+      return json({ ok: false, error: `file removed but index update failed: ${result.error}` }, 502);
+    }
+    return json({ ok: true, id, version, fileRemoved, indexAction: 'removed', reason });
   }
 
   const files = await listModuleFiles(env, id);
@@ -605,12 +656,82 @@ async function handleEdit(request, env) {
   return json({ ok: false, error: 'index is contended, retry later' }, 503);
 }
 
+/** Dotted version comparison; positive means `a` is newer than `b`. */
+function compareVersions(a, b) {
+  const left = String(a || '').split('.');
+  const right = String(b || '').split('.');
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const l = left[index] === undefined ? '0' : left[index];
+    const r = right[index] === undefined ? '0' : right[index];
+    if (/^\d+$/.test(l) && /^\d+$/.test(r)) {
+      const diff = Number(l) - Number(r);
+      if (diff !== 0) return diff;
+      continue;
+    }
+    if (l !== r) return l > r ? 1 : -1;
+  }
+  return 0;
+}
+
 async function listModuleFiles(env, id) {
   const listing = await ghListDir(env, 'modules');
   if (!Array.isArray(listing)) return [];
   return listing
     .filter(item => item.type === 'file' && item.name.startsWith(`${id}-`) && /\.zip$/i.test(item.name))
     .map(item => item.name);
+}
+
+/**
+ * Rebuilds a catalog entry for `version` from the ZIP that is actually in the repo, keeping
+ * the descriptive fields of `base`.
+ */
+async function describeCatalogVersion(env, id, version, base) {
+  const path = `modules/${id}-${version}.zip`;
+  const base64 = await ghGetBase64(env, path);
+  if (!base64) return null;
+  const bytes = base64ToBytes(base64);
+  const { downloadUrl, fallbackUrl } = repoFileUrls(env, path);
+  return {
+    ...base,
+    id,
+    version,
+    sizeBytes: bytes.byteLength,
+    sha256: await digestHex(bytes),
+    downloadUrl,
+    fallbackUrl,
+    lastUpdated: Math.floor(Date.now() / 1000)
+  };
+}
+
+/** Writes `entry` over the catalog entry for `id`, deliberately skipping the versionCode guard. */
+async function replaceIndexEntry(env, id, entry, attempts = 3) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const indexDoc = (await ghGetJson(env, 'modules.json')) || {
+      name: 'ShizukuX 官方模块仓库',
+      schemaVersion: 1,
+      modules: []
+    };
+    const modules = Array.isArray(indexDoc.modules) ? indexDoc.modules : [];
+    const next = {
+      ...indexDoc,
+      schemaVersion: indexDoc.schemaVersion || 1,
+      updatedAt: Math.floor(Date.now() / 1000),
+      modules: modules.filter(m => m.id !== id).concat(entry)
+    };
+    const payload = new TextEncoder().encode(JSON.stringify(next, null, 2));
+    const sha = await ghGetSha(env, 'modules.json');
+    const result = await ghPut(env, 'modules.json', {
+      message: `module: roll back ${id} to v${entry.version}`,
+      content: toBase64(payload)
+    }, sha);
+    if (result.ok) return { ok: true };
+    if (result.status !== 409 && result.status !== 422) {
+      return { ok: false, error: String(result.status) };
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return { ok: false, error: 'index is contended, retry later' };
 }
 
 async function removeFromIndex(env, id, attempts = 3) {

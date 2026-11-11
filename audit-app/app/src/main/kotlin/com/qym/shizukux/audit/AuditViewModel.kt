@@ -115,7 +115,8 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * `version == null` takes the whole module down: catalog entry plus every ZIP.
-     * Passing a version deletes that ZIP only, and drops the catalog entry when it is the live one.
+     * Passing a version deletes that ZIP only; when it is the live version the catalog entry
+     * steps back to the newest ZIP left, and is dropped only when nothing remains.
      */
     fun unpublish(id: String, version: String?) {
         viewModelScope.launch {
@@ -125,11 +126,15 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
                 val removedFiles = result.optInt("deletedFiles", 0)
                 val indexRemoved = result.optBoolean("indexRemoved", false)
                 val fileRemoved = result.optBoolean("fileRemoved", false)
+                val indexAction = result.optString("indexAction", "")
+                val rolledBackTo = result.optString("rolledBackTo", "")
                 message = when {
                     version.isNullOrBlank() ->
                         "已下架 $id：删除 $removedFiles 个 ZIP${if (indexRemoved) "，索引已移除" else ""}"
-                    indexRemoved -> "已删除 $id v$version，索引条目同时移除"
-                    fileRemoved -> "已删除 $id v$version"
+                    indexAction == "rolledBack" ->
+                        "已删除 $id v$version，商店已回退到 v$rolledBackTo"
+                    indexAction == "removed" -> "已删除 $id v$version，这是最后一版，条目已移除"
+                    fileRemoved -> "已删除 $id v$version，商店里的上架版本未受影响"
                     else -> "已处理 $id v$version"
                 }
                 error = null
