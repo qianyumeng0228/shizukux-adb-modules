@@ -170,12 +170,32 @@ async function handleSubmit(request, env) {
   const id = (props.id || '').trim();
   if (!MODULE_ID.test(id)) return json({ ok: false, error: 'invalid module id in module.prop' }, 400);
 
-  const rawVersion = (props.version || '').trim();
+  // The upload sheet lets the author rewrite the store-facing fields before submitting, and the
+  // client repacks module.prop to match; these overrides are still honoured so a client that
+  // only rewrites the catalog cannot publish a label that contradicts the ZIP.
+  const hasMeta = key => Object.prototype.hasOwnProperty.call(meta, key);
+  const metaText = key => (hasMeta(key) ? String(meta[key] === null ? '' : meta[key]).trim() : '');
+
+  const rawVersion = metaText('version') || (props.version || '').trim();
   if (!rawVersion) return json({ ok: false, error: 'module.prop is missing version' }, 400);
   // Catalog convention is a bare version ("1.0.3"); authors often write "v1.0.3".
   const version = rawVersion.replace(/^[vV]/, '').trim();
   if (!version) return json({ ok: false, error: 'module.prop has an empty version' }, 400);
-  const versionCode = Number.parseInt(props.versionCode || '0', 10) || null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(version)) {
+    return json({ ok: false, error: 'invalid version' }, 400);
+  }
+
+  const rawVersionCode = metaText('versionCode') || (props.versionCode || '').trim();
+  const parsedCode = Number.parseInt(rawVersionCode, 10);
+  const versionCode = Number.isFinite(parsedCode) && parsedCode > 0 ? parsedCode : null;
+
+  const displayName = metaText('name') || (props.name || '').trim() || id;
+  const displayAuthor = hasMeta('author')
+    ? (metaText('author') || null)
+    : ((props.author || '').trim() || null);
+  const displayDescription = hasMeta('description')
+    ? (metaText('description') || null)
+    : ((props.description || '').trim() || null);
 
   const repoRef = repoCoordinates(env);
   if (!repoRef.token) return json({ ok: false, error: 'server is missing GITHUB_TOKEN' }, 500);
@@ -216,12 +236,12 @@ async function handleSubmit(request, env) {
     id,
     version,
     versionCode,
-    name: (props.name || id).trim(),
-    author: (props.author || '').trim() || null,
-    description: (props.description || '').trim() || null,
+    name: displayName,
+    author: displayAuthor,
+    description: displayDescription,
     nameZh: meta.nameZh || null,
     descriptionZh: meta.descriptionZh || null,
-    tags: Array.isArray(meta.tags) ? meta.tags.slice(0, 8).map(String) : [],
+    tags: Array.isArray(meta.tags) ? meta.tags.slice(0, 6).map(String) : [],
     sourceRepo: meta.sourceRepo || null,
     sizeBytes: file.size,
     sha256,

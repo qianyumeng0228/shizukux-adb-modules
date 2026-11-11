@@ -54,8 +54,20 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
 
 | part   | 内容 |
 | ------ | ---- |
-| `meta` | JSON：id/name/version/versionCode/author/description/usesShellBridge/minSdk/sizeBytes/sha256 |
+| `meta` | JSON：id/name/nameZh/author/description/descriptionZh/version/versionCode/tags/usesShellBridge/minSdk/sizeBytes/sha256 |
 | `file` | 模块 ZIP（≤ 32 MB） |
+
+`meta` 的展示字段优先于 ZIP 内 `module.prop`：`name` / `nameZh` / `author` / `description` /
+`descriptionZh` / `version` / `versionCode` / `tags` 只要出现且非空就覆盖 props 里的同名值
+（`author` 显式传空串表示作者留空）。约束：
+
+- `version` 需匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$`，否则回退 props 值；
+- `versionCode` 只在 > 0 时采用，否则记 `null`；
+- `tags` 数组或逗号分隔字符串，最多保留 6 个。
+
+结构标志（`minSdk` / `hasAction` / `hasService` / `usesWebUI` / `declaresShellBridge`）始终以
+ZIP 探测结果为准，不能通过 `meta` 改写。App 侧在提交前会把编辑后的字段重写回 ZIP 内
+`module.prop` 再上传，因此商店索引与安装后的 `module.prop` 保持一致。
 
 成功：`202 {"ok":true,"status":"pending","ticket":"t_…","message":"… 已进入审核队列","sha256":"…","sizeBytes":N,"issueNumber":N,"issueUrl":"…"}`
 失败：`{"ok":false,"error":"…"}`，HTTP 400 / 401 / 409 / 429 / 502。
