@@ -1,0 +1,18 @@
+# Gradle / Android
+audit-app/.gradle/
+audit-app/build/
+audit-app/app/build/
+audit-app/local.properties
+audit-app/.idea/
+audit-app/captures/
+audit-app/keystore.properties
+*.jks
+*.keystore
+
+# Wrangler
+worker/.wrangler/
+worker/node_modules/
+
+# OS
+Thumbs.db
+.DS_Store

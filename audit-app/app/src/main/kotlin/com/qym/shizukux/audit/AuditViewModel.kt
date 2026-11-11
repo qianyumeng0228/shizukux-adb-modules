@@ -1,0 +1,135 @@
+package com.qym.shizukux.audit
+
+import android.app.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
+
+class AuditViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val store = AuditStore(application)
+
+    var endpoint by mutableStateOf(store.endpoint)
+        private set
+    var token by mutableStateOf(store.token)
+        private set
+
+    var pending by mutableStateOf<List<Submission>>(emptyList())
+        private set
+    var published by mutableStateOf<List<PublishedModule>>(emptyList())
+        private set
+
+    var loadingPending by mutableStateOf(false)
+        private set
+    var loadingPublished by mutableStateOf(false)
+        private set
+    var busyTicket by mutableStateOf<String?>(null)
+        private set
+    var testing by mutableStateOf(false)
+        private set
+
+    var message by mutableStateOf<String?>(null)
+        private set
+    var error by mutableStateOf<String?>(null)
+        private set
+
+    private fun api() = AuditApi(endpoint, token)
+
+    fun saveConfig(newEndpoint: String, newToken: String) {
+        store.endpoint = newEndpoint
+        store.token = newToken
+        endpoint = store.endpoint
+        token = store.token
+        message = "配置已保存"
+    }
+
+    fun dismissNotice() {
+        message = null
+        error = null
+    }
+
+    /** Hits /healthz and then /pending, so a green result also proves the token works. */
+    fun testConnection() {
+        viewModelScope.launch {
+            testing = true
+            try {
+                val health = api().healthz()
+                api().pending()
+                message = "连接正常：$health"
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "连接失败"
+            } finally {
+                testing = false
+            }
+        }
+    }
+
+    fun refreshPending() {
+        if (token.isBlank()) {
+            error = "请先在「设置」里填写管理员令牌"
+            return
+        }
+        viewModelScope.launch {
+            loadingPending = true
+            try {
+                pending = api().pending()
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "读取队列失败"
+            } finally {
+                loadingPending = false
+            }
+        }
+    }
+
+    fun refreshPublished() {        viewModelScope.launch {
+            loadingPublished = true
+            try {
+                published = api().published(endpoint)
+                error = null
+            } catch (e: Exception) {
+                error = e.message ?: "读取索引失败"
+            } finally {
+                loadingPublished = false
+            }
+        }
+    }
+
+    fun approve(submission: Submission) = submitReview(submission, "approve", null)
+
+    fun reject(submission: Submission, reason: String) = submitReview(submission, "reject", reason)
+
+    private fun submitReview(submission: Submission, action: String, reason: String?) {
+        viewModelScope.launch {
+            busyTicket = submission.ticket
+            try {
+                val result = api().review(action, submission.ticket, reason)
+                if (action == "approve") {
+                    val path = result.optString("publishedPath")
+                    message = "已通过：${submission.displayName} v${submission.version}" +
+                        if (path.isBlank()) "" else "，已发布到 $path"
+                } else {
+                    message = "已驳回：${submission.displayName} v${submission.version}"
+                }
+                error = null
+                refreshQueueQuietly()
+            } catch (e: Exception) {
+                error = e.message ?: "审核请求失败"
+            } finally {
+                busyTicket = null
+            }
+        }
+    }
+
+    private suspend fun refreshQueueQuietly() {
+        try {
+            pending = api().pending()
+        } catch (_: Exception) {
+            // The verdict already landed; a stale list is not worth an error banner.
+        }
+    }
+}
