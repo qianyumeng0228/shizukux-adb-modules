@@ -120,6 +120,30 @@ class AuditApi(private val endpoint: String, private val token: String) {
         }
     }
 
+    /**
+     * Rewrites the catalog entry. Only the keys present in [patch] are touched; a `version`
+     * change makes the worker rename the ZIP so the download URL stays valid.
+     */
+    suspend fun edit(id: String, expectedVersion: String, patch: JSONObject): JSONObject =
+        withContext(Dispatchers.IO) {
+            val payload = JSONObject()
+                .put("id", id)
+                .put("version", expectedVersion)
+                .put("patch", patch)
+            val body = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
+            val request = Request.Builder()
+                .url("${base()}/edit")
+                .header("X-Admin-Token", token)
+                .post(body)
+                .build()
+            client.newCall(request).execute().use { response ->
+                val text = response.body.string()
+                if (response.code == 401) error("管理员令牌无效（401）")
+                if (!response.isSuccessful) error("保存失败：HTTP ${response.code}\n$text")
+                JSONObject(text)
+            }
+        }
+
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

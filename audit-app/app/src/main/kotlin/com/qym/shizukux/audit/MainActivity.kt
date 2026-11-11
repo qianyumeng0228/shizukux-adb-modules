@@ -51,6 +51,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -288,6 +289,20 @@ private data class RemoveTarget(val id: String, val displayName: String, val ver
 private fun PublishedTab(vm: AuditViewModel) {
     val context = LocalContext.current
     var removeTarget by remember { mutableStateOf<RemoveTarget?>(null) }
+    var editTarget by remember { mutableStateOf<PublishedModule?>(null) }
+
+    val target = editTarget
+    if (target != null) {
+        EditModuleScreen(
+            module = target,
+            onDismiss = { editTarget = null },
+            onSave = { patch ->
+                editTarget = null
+                vm.edit(target, patch)
+            }
+        )
+        return
+    }
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -390,10 +405,15 @@ private fun PublishedTab(vm: AuditViewModel) {
                                     ) { Text("打开下载地址", fontSize = 12.sp) }
                                 }
                                 Spacer(Modifier.weight(1f))
-                                if (vm.busyModule == item.id) {
+                                if (vm.busyModule == "${item.id}#edit") {
                                     CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                                     Spacer(Modifier.width(6.dp))
                                 }
+                                TextButton(
+                                    onClick = { editTarget = item },
+                                    enabled = vm.busyModule != "${item.id}#edit"
+                                ) { Text("编辑", fontSize = 12.sp) }
+                                Spacer(Modifier.width(4.dp))
                                 OutlinedButton(
                                     onClick = { removeTarget = RemoveTarget(item.id, item.displayName, null) },
                                     enabled = vm.busyModule != item.id
@@ -432,6 +452,101 @@ private fun PublishedTab(vm: AuditViewModel) {
             dismissButton = { TextButton(onClick = { removeTarget = null }) { Text("取消") } }
         )
     }
+}
+
+/**
+ * Full-screen editor rather than a dialog: the dialog window does not accept IME input on this
+ * device, and the field list is long enough to want the whole screen anyway.
+ */
+@Composable
+private fun EditModuleScreen(
+    module: PublishedModule,
+    onDismiss: () -> Unit,
+    onSave: (JSONObject) -> Unit
+) {
+    var name by remember { mutableStateOf(module.name) }
+    var nameZh by remember { mutableStateOf(module.nameZh.orEmpty()) }
+    var author by remember { mutableStateOf(module.author.orEmpty()) }
+    var version by remember { mutableStateOf(module.version) }
+    var versionCode by remember { mutableStateOf(module.versionCode?.toString().orEmpty()) }
+    var description by remember { mutableStateOf(module.description.orEmpty()) }
+    var descriptionZh by remember { mutableStateOf(module.descriptionZh.orEmpty()) }
+    var tags by remember { mutableStateOf(module.tags.joinToString(", ")) }
+
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onDismiss) { Text("取消") }
+            Spacer(Modifier.weight(1f))
+            Text("编辑模块信息", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Button(
+                onClick = {
+                    val patch = JSONObject()
+                    if (name != module.name) patch.put("name", name)
+                    if (nameZh != module.nameZh.orEmpty()) patch.put("nameZh", nameZh)
+                    if (author != module.author.orEmpty()) patch.put("author", author)
+                    if (version != module.version) patch.put("version", version)
+                    if (versionCode != module.versionCode?.toString().orEmpty()) {
+                        patch.put("versionCode", versionCode)
+                    }
+                    if (description != module.description.orEmpty()) {
+                        patch.put("description", description)
+                    }
+                    if (descriptionZh != module.descriptionZh.orEmpty()) {
+                        patch.put("descriptionZh", descriptionZh)
+                    }
+                    if (tags != module.tags.joinToString(", ")) patch.put("tags", tags)
+                    if (patch.length() == 0) onDismiss() else onSave(patch)
+                }
+            ) { Text("保存") }
+        }
+
+        Text(
+            module.id,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(bottom = 10.dp)
+        )
+
+        EditField("名称", name) { name = it }
+        EditField("中文名", nameZh) { nameZh = it }
+        EditField("作者", author) { author = it }
+        EditField("版本号", version) { version = it }
+        Text(
+            "改版本号会同时重命名仓库里的 ZIP，下载地址保持有效。",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.secondary,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        EditField("版本码", versionCode) { versionCode = it }
+        EditField("简介", description, minLines = 3) { description = it }
+        EditField("中文简介", descriptionZh, minLines = 3) { descriptionZh = it }
+        EditField("标签（逗号分隔，最多 6 个）", tags) { tags = it }
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun EditField(
+    label: String,
+    value: String,
+    minLines: Int = 1,
+    onValueChange: (String) -> Unit
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = onValueChange,
+        label = { Text(label, fontSize = 12.sp) },
+        singleLine = minLines == 1,
+        minLines = minLines,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+    )
 }
 
 @Composable

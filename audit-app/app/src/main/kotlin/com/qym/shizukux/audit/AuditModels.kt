@@ -30,12 +30,14 @@ data class PublishedModule(
     val versionCode: Int?,
     val author: String?,
     val description: String?,
+    val nameZh: String?,
+    val descriptionZh: String?,
     val downloadUrl: String?,
     val fallbackUrl: String?,
     val sizeBytes: Long,
     val tags: List<String>
 ) {
-    val displayName: String get() = name.ifBlank { id }
+    val displayName: String get() = name.ifBlank { nameZh ?: id }
 }
 
 /** One ZIP actually sitting in `modules/`, with its version parsed out. */
@@ -77,6 +79,8 @@ internal fun JSONObject.toPublished(): PublishedModule {
         versionCode = if (has("versionCode") && !isNull("versionCode")) optInt("versionCode") else null,
         author = optString("author").takeIf { it.isNotBlank() && it != "null" },
         description = optString("description").takeIf { it.isNotBlank() && it != "null" },
+        nameZh = optString("nameZh").takeIf { it.isNotBlank() && it != "null" },
+        descriptionZh = optString("descriptionZh").takeIf { it.isNotBlank() && it != "null" },
         downloadUrl = optString("downloadUrl").takeIf { it.isNotBlank() && it != "null" },
         fallbackUrl = optString("fallbackUrl").takeIf { it.isNotBlank() && it != "null" },
         sizeBytes = optLong("sizeBytes"),

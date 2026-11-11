@@ -95,6 +95,10 @@ export default {
         if (request.method !== 'POST') return json({ ok: false, error: 'POST required' }, 405);
         return await handleUnpublish(request, env);
       }
+      if (url.pathname === '/edit') {
+        if (request.method !== 'POST') return json({ ok: false, error: 'POST required' }, 405);
+        return await handleEdit(request, env);
+      }
       return json({ ok: false, error: 'not found' }, 404);
     } catch (error) {
       return json({ ok: false, error: String(error && error.message ? error.message : error) }, 500);
@@ -480,6 +484,125 @@ async function handleUnpublish(request, env) {
   }
   if (deletedFiles === 0 && !indexRemoved) return json({ ok: false, error: 'module not found' }, 404);
   return json({ ok: true, id, deletedFiles, indexRemoved, reason });
+}
+
+/** Fields an operator may rewrite without touching the ZIP itself. */
+const EDITABLE_TEXT_FIELDS = ['name', 'nameZh', 'description', 'descriptionZh', 'author', 'sourceRepo'];
+
+function repoFileUrls(env, path) {
+  const { owner, repo, branch } = repoCoordinates(env);
+  return {
+    downloadUrl: `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${branch}/${path}`,
+    fallbackUrl: `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`
+  };
+}
+
+/**
+ * Rewrites a published catalog entry.
+ * Display fields (name/author/descriptions/tags) are free-form; changing `version` also renames
+ * the ZIP so `downloadUrl` keeps pointing at a real file, and `versionCode` follows it.
+ */
+async function handleEdit(request, env) {
+  if (!isAdmin(request, env)) return json({ ok: false, error: 'unauthorized' }, 401);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: 'JSON body expected' }, 400);
+  }
+  const id = String(body.id || '').trim();
+  if (!/^[A-Za-z][A-Za-z0-9._-]{1,63}$/.test(id)) {
+    return json({ ok: false, error: 'invalid module id' }, 400);
+  }
+  const patch = body.patch && typeof body.patch === 'object' ? body.patch : null;
+  if (!patch) return json({ ok: false, error: 'patch object required' }, 400);
+
+  const expectedVersion = String(body.version || '').trim().replace(/^[vV]/, '');
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const doc = (await ghGetJson(env, 'modules.json')) || {};
+    const modules = Array.isArray(doc.modules) ? doc.modules : [];
+    const position = modules.findIndex(m => m.id === id);
+    if (position < 0) return json({ ok: false, error: 'module not found' }, 404);
+
+    const entry = { ...modules[position] };
+    if (expectedVersion && String(entry.version) !== expectedVersion) {
+      return json({ ok: false, error: `catalog holds v${entry.version}, not v${expectedVersion}` }, 409);
+    }
+
+    let renamedFrom = null;
+    let renamedTo = null;
+
+    if (patch.version !== undefined && String(patch.version).trim()) {
+      const nextVersion = String(patch.version).trim().replace(/^[vV]/, '');
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/.test(nextVersion)) {
+        return json({ ok: false, error: 'invalid version' }, 400);
+      }
+      if (nextVersion !== String(entry.version)) {
+        const from = `modules/${id}-${entry.version}.zip`;
+        const to = `modules/${id}-${nextVersion}.zip`;
+        if (await ghGetSha(env, to)) {
+          return json({ ok: false, error: `v${nextVersion} already exists in the repo` }, 409);
+        }
+        const content = await ghGetBase64(env, from);
+        if (!content) return json({ ok: false, error: 'published zip is missing' }, 404);
+        const put = await ghPut(env, to, {
+          message: `module: rename ${id} v${entry.version} -> v${nextVersion}`,
+          content
+        });
+        if (!put.ok) return json({ ok: false, error: `rename failed: ${put.status}` }, 502);
+        await ghDelete(env, from, `module: drop renamed copy of ${id} v${entry.version}`);
+        entry.version = nextVersion;
+        Object.assign(entry, repoFileUrls(env, to));
+        renamedFrom = from;
+        renamedTo = to;
+      }
+    }
+
+    if (patch.versionCode !== undefined && String(patch.versionCode).trim() !== '') {
+      const code = Number.parseInt(String(patch.versionCode), 10);
+      if (!Number.isFinite(code) || code <= 0) {
+        return json({ ok: false, error: 'invalid versionCode' }, 400);
+      }
+      entry.versionCode = code;
+    }
+
+    for (const field of EDITABLE_TEXT_FIELDS) {
+      if (patch[field] === undefined) continue;
+      const limit = field === 'description' || field === 'descriptionZh' ? 400 : 120;
+      const value = String(patch[field] ?? '').trim().slice(0, limit);
+      if (value) entry[field] = value;
+      else delete entry[field];
+    }
+
+    if (patch.tags !== undefined) {
+      const raw = Array.isArray(patch.tags) ? patch.tags : String(patch.tags).split(',');
+      entry.tags = raw
+        .map(tag => String(tag).trim().slice(0, 24))
+        .filter(Boolean)
+        .slice(0, 6);
+    }
+
+    entry.lastUpdated = Math.floor(Date.now() / 1000);
+    const next = {
+      ...doc,
+      schemaVersion: doc.schemaVersion || 1,
+      updatedAt: Math.floor(Date.now() / 1000),
+      modules: modules.map((m, i) => (i === position ? entry : m))
+    };
+    const sha = await ghGetSha(env, 'modules.json');
+    const result = await ghPut(env, 'modules.json', {
+      message: `module: edit ${id} v${entry.version}`,
+      content: toBase64(new TextEncoder().encode(JSON.stringify(next, null, 2)))
+    }, sha);
+    if (result.ok) return json({ ok: true, module: entry, renamedFrom, renamedTo });
+    if (result.status !== 409 && result.status !== 422) {
+      return json({ ok: false, error: `index update failed: ${result.status}` }, 502);
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return json({ ok: false, error: 'index is contended, retry later' }, 503);
 }
 
 async function listModuleFiles(env, id) {

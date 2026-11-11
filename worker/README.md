@@ -109,6 +109,27 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
   返回 `{"ok":true,"id":…,"version":…,"fileRemoved":true,"indexRemoved":false}`。
 - 两者都不存在时返回 404；索引更新失败时返回 502，但已删文件不会回滚（Git 历史可恢复）。
 
+### `POST /edit`（管理端）
+
+需要 `X-Admin-Token`，`patch` 里只提交要改的键：
+
+```json
+{"id":"upload.selftest","version":"1.0.4","patch":{
+  "name":"Record Module","nameZh":"记录模块","author":"ShizukuX",
+  "description":"…","descriptionZh":"…","tags":["记录","设备信息"],
+  "version":"1.0.5","versionCode":6
+}}
+```
+
+- `name` / `nameZh` / `author` / `description` / `descriptionZh` / `sourceRepo`：直接改写，传空串即删除该字段。
+- `tags`：数组或逗号分隔字符串，最多 6 个。
+- `version`：**同时把 `modules/<id>-<old>.zip` 重命名为 `modules/<id>-<new>.zip`**，并重算
+  `downloadUrl` / `fallbackUrl`，所以下载链接不会 404；目标文件名已存在时返回 409。
+- `versionCode`：只改索引里的数字，不动 ZIP。
+- `version` 传的是**客户端看到的当前版本**，与服务端不一致时 409，避免并发改错条目。
+
+返回 `{"ok":true,"module":{…},"renamedFrom":…,"renamedTo":…}`。
+
 ### `GET /index`（公开）
 
 直接回源读取仓库里的 `modules.json`。审核 App 用它刷「已上架」，避免 jsDelivr / raw 的缓存延迟。

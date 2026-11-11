@@ -142,6 +142,29 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Saves the catalog entry. `version` in [patch] renames the ZIP server-side, so download
+     * links keep working; display fields are rewritten in place.
+     */
+    fun edit(module: PublishedModule, patch: org.json.JSONObject) {
+        viewModelScope.launch {
+            busyModule = "${module.id}#edit"
+            try {
+                val result = api().edit(module.id, module.version, patch)
+                val saved = result.optJSONObject("module")
+                val renamed = !result.isNull("renamedTo")
+                message = "已保存 ${module.displayName}" +
+                    if (renamed) "，版本号改为 v${saved?.optString("version").orEmpty()}" else ""
+                error = null
+                refreshPublished()
+            } catch (e: Exception) {
+                error = e.message ?: "保存失败"
+            } finally {
+                busyModule = null
+            }
+        }
+    }
+
     fun approve(submission: Submission) = submitReview(submission, "approve", null)
 
     fun reject(submission: Submission, reason: String) = submitReview(submission, "reject", reason)
