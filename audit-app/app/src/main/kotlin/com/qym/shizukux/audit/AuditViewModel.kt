@@ -21,12 +21,16 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var published by mutableStateOf<List<PublishedModule>>(emptyList())
         private set
+    var files by mutableStateOf<List<ModuleFile>>(emptyList())
+        private set
 
     var loadingPending by mutableStateOf(false)
         private set
     var loadingPublished by mutableStateOf(false)
         private set
     var busyTicket by mutableStateOf<String?>(null)
+        private set
+    var busyModule by mutableStateOf<String?>(null)
         private set
     var testing by mutableStateOf(false)
         private set
@@ -37,6 +41,10 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     private fun api() = AuditApi(endpoint, token)
+
+    /** All published ZIPs of one module id, newest first. */
+    fun filesFor(id: String): List<ModuleFile> =
+        files.filter { it.id == id }.sortedByDescending { it.version.orEmpty() }
 
     fun saveConfig(newEndpoint: String, newToken: String) {
         store.endpoint = newEndpoint
@@ -86,15 +94,50 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshPublished() {        viewModelScope.launch {
+    fun refreshPublished() {
+        if (token.isBlank()) {
+            error = "请先在「设置」里填写管理员令牌"
+            return
+        }
+        viewModelScope.launch {
             loadingPublished = true
             try {
                 published = api().published(endpoint)
+                files = api().moduleFiles()
                 error = null
             } catch (e: Exception) {
                 error = e.message ?: "读取索引失败"
             } finally {
                 loadingPublished = false
+            }
+        }
+    }
+
+    /**
+     * `version == null` takes the whole module down: catalog entry plus every ZIP.
+     * Passing a version deletes that ZIP only, and drops the catalog entry when it is the live one.
+     */
+    fun unpublish(id: String, version: String?) {
+        viewModelScope.launch {
+            busyModule = if (version.isNullOrBlank()) id else "$id@$version"
+            try {
+                val result = api().unpublish(id, version)
+                val removedFiles = result.optInt("deletedFiles", 0)
+                val indexRemoved = result.optBoolean("indexRemoved", false)
+                val fileRemoved = result.optBoolean("fileRemoved", false)
+                message = when {
+                    version.isNullOrBlank() ->
+                        "已下架 $id：删除 $removedFiles 个 ZIP${if (indexRemoved) "，索引已移除" else ""}"
+                    indexRemoved -> "已删除 $id v$version，索引条目同时移除"
+                    fileRemoved -> "已删除 $id v$version"
+                    else -> "已处理 $id v$version"
+                }
+                error = null
+                refreshPublished()
+            } catch (e: Exception) {
+                error = e.message ?: "下架失败"
+            } finally {
+                busyModule = null
             }
         }
     }
@@ -110,10 +153,10 @@ class AuditViewModel(application: Application) : AndroidViewModel(application) {
                 val result = api().review(action, submission.ticket, reason)
                 if (action == "approve") {
                     val path = result.optString("publishedPath")
-                    message = "已通过：${submission.displayName} v${submission.version}" +
-                        if (path.isBlank()) "" else "，已发布到 $path"
+                    message = "已通过：" + submission.displayName + " v" + submission.version +
+                        if (path.isBlank()) "" else "，已发布到 " + path
                 } else {
-                    message = "已驳回：${submission.displayName} v${submission.version}"
+                    message = "已驳回：" + submission.displayName + " v" + submission.version
                 }
                 error = null
                 refreshQueueQuietly()

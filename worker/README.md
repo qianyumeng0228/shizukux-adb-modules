@@ -81,6 +81,34 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
 通过时重读 pending ZIP、重算 SHA-256 与记录比对，不一致直接 409（防止审核后被掉包）。
 两个动作都会 `issueClosed` 告知是否成功关掉 issue（issue 不存在时为 `false`，不影响审核结果）。
 
+### `GET /modules`（管理端）
+
+需要 `X-Admin-Token`。列出 `modules/` 下每个 ZIP，并按索引里的 id 反解所属模块与版本：
+
+```json
+{"ok":true,"count":4,"files":[
+  {"name":"shizukux.recorder-1.0.0.zip","id":"shizukux.recorder","version":"1.0.0","sizeBytes":2028,"inCatalog":true}
+]}
+```
+
+索引里已没有的 ZIP 仍会列出，此时 `id`/`version` 为 `null`、`inCatalog` 为 `false`（孤儿文件）。
+归属判定用最长 id 前缀匹配，避免 `a.b` 把 `a.bc-1.0.zip` 误判成自己的版本。
+
+### `POST /unpublish`（管理端）
+
+需要 `X-Admin-Token`，JSON：
+
+```json
+{"id":"upload.selftest"}
+{"id":"upload.selftest","version":"1.0.2","reason":"历史版本清理"}
+```
+
+- 只给 `id`：整模块下架——移除 `modules.json` 条目并删除 `modules/<id>-*.zip` 全部文件，
+  返回 `{"ok":true,"id":…,"deletedFiles":N,"indexRemoved":true}`。
+- 再给 `version`：只删这一个 ZIP；若它正是索引当前版本，索引条目同时移除（模块即从商店消失），
+  返回 `{"ok":true,"id":…,"version":…,"fileRemoved":true,"indexRemoved":false}`。
+- 两者都不存在时返回 404；索引更新失败时返回 502，但已删文件不会回滚（Git 历史可恢复）。
+
 ### `GET /index`（公开）
 
 直接回源读取仓库里的 `modules.json`。审核 App 用它刷「已上架」，避免 jsDelivr / raw 的缓存延迟。
@@ -88,7 +116,7 @@ manager/src/main/java/af/shizuku/manager/module/store/ModuleUploadClient.kt
 ### `GET /healthz`
 
 ```json
-{"ok":true,"reviewQueue":true,"rateLimit":true,"adminConfigured":true,"issueSync":true,"issueLabel":"submission"}
+{"ok":true,"reviewQueue":true,"rateLimit":true,"adminConfigured":true,"issueSync":true,"issueLabel":"submission","indexRoute":true}
 ```
 
 用于探活与自查配置：`rateLimit:false` 说明没绑 `SUBMIT_KV`，`issueSync:false` 说明没有 `GITHUB_TOKEN`。

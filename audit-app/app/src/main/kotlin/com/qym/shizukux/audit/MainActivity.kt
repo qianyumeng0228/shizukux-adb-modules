@@ -281,9 +281,14 @@ private fun SubmissionCard(
     }
 }
 
+/** What the management dialog acts on: one version, or the whole module. */
+private data class RemoveTarget(val id: String, val displayName: String, val version: String?)
+
 @Composable
 private fun PublishedTab(vm: AuditViewModel) {
     val context = LocalContext.current
+    var removeTarget by remember { mutableStateOf<RemoveTarget?>(null) }
+
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -311,6 +316,7 @@ private fun PublishedTab(vm: AuditViewModel) {
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 16.dp)
             ) {
                 items(vm.published, key = { it.id }) { item ->
+                    val versions = vm.filesFor(item.id)
                     Card(
                         Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -330,16 +336,68 @@ private fun PublishedTab(vm: AuditViewModel) {
                                 Spacer(Modifier.height(6.dp))
                                 Text(item.tags.joinToString(" · "), fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
                             }
-                            item.downloadUrl?.let { url ->
-                                Spacer(Modifier.height(8.dp))
-                                TextButton(
-                                    onClick = {
-                                        runCatching {
-                                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+
+                            DividerLine()
+                            Text(
+                                "仓库版本 ${versions.size}",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            if (versions.isEmpty()) {
+                                Spacer(Modifier.height(4.dp))
+                                Text("没有找到对应 ZIP", fontSize = 11.sp, color = MaterialTheme.colorScheme.secondary)
+                            } else {
+                                versions.forEach { file ->
+                                    val key = "${item.id}@${file.version}"
+                                    val busy = vm.busyModule == key
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(top = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("v${file.version ?: "?"}", fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            formatSize(file.sizeBytes),
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        if (busy) {
+                                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                            Spacer(Modifier.width(6.dp))
                                         }
-                                    },
-                                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-                                ) { Text("打开下载地址", fontSize = 12.sp) }
+                                        TextButton(
+                                            onClick = {
+                                                removeTarget = RemoveTarget(item.id, item.displayName, file.version)
+                                            },
+                                            enabled = !busy
+                                        ) {
+                                            Text("删除", fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                item.downloadUrl?.let { url ->
+                                    TextButton(
+                                        onClick = {
+                                            runCatching {
+                                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                            }
+                                        },
+                                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                                    ) { Text("打开下载地址", fontSize = 12.sp) }
+                                }
+                                Spacer(Modifier.weight(1f))
+                                if (vm.busyModule == item.id) {
+                                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                OutlinedButton(
+                                    onClick = { removeTarget = RemoveTarget(item.id, item.displayName, null) },
+                                    enabled = vm.busyModule != item.id
+                                ) { Text("下架", color = MaterialTheme.colorScheme.error) }
                             }
                         }
                     }
@@ -347,6 +405,41 @@ private fun PublishedTab(vm: AuditViewModel) {
             }
         }
     }
+
+    removeTarget?.let { target ->
+        val wholeModule = target.version == null
+        AlertDialog(
+            onDismissRequest = { removeTarget = null },
+            title = { Text(if (wholeModule) "下架 ${target.displayName}？" else "删除 v${target.version}？") },
+            text = {
+                Text(
+                    if (wholeModule) {
+                        "会移除索引条目并删除该模块的全部 ZIP，商店卡片与下载链接立即失效。"
+                    } else {
+                        "只删除 modules/ 里的这个 ZIP。若它正是当前上架版本，索引条目会一并移除，模块将从商店消失。"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val pending = target
+                    removeTarget = null
+                    vm.unpublish(pending.id, pending.version)
+                }) {
+                    Text(if (wholeModule) "下架" else "删除", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { removeTarget = null }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun DividerLine() {
+    Box(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp).height(1.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+    )
 }
 
 @Composable

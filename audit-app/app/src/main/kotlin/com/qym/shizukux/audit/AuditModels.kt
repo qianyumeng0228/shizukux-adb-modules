@@ -38,6 +38,15 @@ data class PublishedModule(
     val displayName: String get() = name.ifBlank { id }
 }
 
+/** One ZIP actually sitting in `modules/`, with its version parsed out. */
+data class ModuleFile(
+    val name: String,
+    val id: String?,
+    val version: String?,
+    val sizeBytes: Long,
+    val inCatalog: Boolean
+)
+
 internal fun JSONObject.toSubmission(): Submission = Submission(
     ticket = optString("ticket"),
     id = optString("id"),
@@ -74,3 +83,11 @@ internal fun JSONObject.toPublished(): PublishedModule {
         tags = tags
     )
 }
+
+internal fun JSONObject.toModuleFile(): ModuleFile = ModuleFile(
+    name = optString("name"),
+    id = optString("id").takeIf { it.isNotBlank() && it != "null" },
+    version = optString("version").takeIf { it.isNotBlank() && it != "null" },
+    sizeBytes = optLong("sizeBytes"),
+    inCatalog = optBoolean("inCatalog", true)
+)

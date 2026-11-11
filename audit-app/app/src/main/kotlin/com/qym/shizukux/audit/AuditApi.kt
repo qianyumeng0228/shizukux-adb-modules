@@ -83,6 +83,43 @@ class AuditApi(private val endpoint: String, private val token: String) {
         }
     }
 
+    /** Every ZIP under modules/, so a module with several versions can be managed one by one. */
+    suspend fun moduleFiles(): List<ModuleFile> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("${base()}/modules")
+            .header("X-Admin-Token", token)
+            .get()
+            .build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body.string()
+            if (response.code == 401) error("管理员令牌无效（401）")
+            if (!response.isSuccessful) error("读取模块文件失败：HTTP ${response.code}\n$text")
+            val array = JSONObject(text).optJSONArray("files") ?: JSONArray()
+            (0 until array.length()).map { array.getJSONObject(it).toModuleFile() }
+        }
+    }
+
+    /**
+     * `version == null` removes the whole module (catalog entry plus every ZIP). Passing a
+     * version deletes that one ZIP, and takes the catalog entry down when it is the live one.
+     */
+    suspend fun unpublish(id: String, version: String?): JSONObject = withContext(Dispatchers.IO) {
+        val payload = JSONObject().put("id", id)
+        if (!version.isNullOrBlank()) payload.put("version", version)
+        val body = payload.toString().toRequestBody(JSON_MEDIA_TYPE)
+        val request = Request.Builder()
+            .url("${base()}/unpublish")
+            .header("X-Admin-Token", token)
+            .post(body)
+            .build()
+        client.newCall(request).execute().use { response ->
+            val text = response.body.string()
+            if (response.code == 401) error("管理员令牌无效（401）")
+            if (!response.isSuccessful) error("下架失败：HTTP ${response.code}\n$text")
+            JSONObject(text)
+        }
+    }
+
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }

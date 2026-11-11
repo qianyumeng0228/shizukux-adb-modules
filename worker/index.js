@@ -87,6 +87,14 @@ export default {
         if (request.method !== 'POST') return json({ ok: false, error: 'POST required' }, 405);
         return await handleReview(request, env);
       }
+      if (url.pathname === '/modules') {
+        if (request.method !== 'GET') return json({ ok: false, error: 'GET required' }, 405);
+        return await handleModuleFiles(request, env);
+      }
+      if (url.pathname === '/unpublish') {
+        if (request.method !== 'POST') return json({ ok: false, error: 'POST required' }, 405);
+        return await handleUnpublish(request, env);
+      }
       return json({ ok: false, error: 'not found' }, 404);
     } catch (error) {
       return json({ ok: false, error: String(error && error.message ? error.message : error) }, 500);
@@ -384,6 +392,130 @@ async function handleReview(request, env) {
   return json({ ok: true, status: 'approved', ticket: record.ticket, publishedPath, issueClosed });
 }
 
+// -- published module management ------------------------------------------
+
+/** Lists every ZIP under modules/, resolved against the ids currently in the index. */
+async function handleModuleFiles(request, env) {
+  if (!isAdmin(request, env)) return json({ ok: false, error: 'unauthorized' }, 401);
+  const listing = await ghListDir(env, 'modules');
+  if (!Array.isArray(listing)) return json({ ok: false, error: 'modules directory unavailable' }, 502);
+
+  const indexDoc = (await ghGetJson(env, 'modules.json')) || {};
+  const ids = (Array.isArray(indexDoc.modules) ? indexDoc.modules : []).map(m => m.id);
+  const files = [];
+  for (const item of listing) {
+    if (item.type !== 'file' || !/\.zip$/i.test(item.name)) continue;
+    // Longest id wins, so "a.b" is not mistaken for the prefix of "a.bc-1.0.zip".
+    const owner = ids
+      .filter(candidate => item.name.startsWith(`${candidate}-`))
+      .sort((a, b) => b.length - a.length)[0] || null;
+    files.push({
+      name: item.name,
+      id: owner,
+      version: owner ? item.name.slice(owner.length + 1).replace(/\.zip$/i, '') : null,
+      sizeBytes: item.size,
+      inCatalog: Boolean(owner)
+    });
+  }
+  return json({ ok: true, count: files.length, files });
+}
+
+/**
+ * Removes a published module, or one of its versions.
+ * `{id}`           → drop the catalog entry and every `modules/<id>-*.zip`
+ * `{id, version}`  → delete that ZIP; if it is the catalog's version the entry goes too
+ */
+async function handleUnpublish(request, env) {
+  if (!isAdmin(request, env)) return json({ ok: false, error: 'unauthorized' }, 401);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: 'JSON body expected' }, 400);
+  }
+
+  const id = String(body.id || '').trim();
+  if (!/^[A-Za-z][A-Za-z0-9._-]{1,63}$/.test(id)) {
+    return json({ ok: false, error: 'invalid module id' }, 400);
+  }
+  const version = String(body.version || '').trim().replace(/^[vV]/, '');
+  const reason = String(body.reason || '').slice(0, 200) || null;
+
+  const indexDoc = (await ghGetJson(env, 'modules.json')) || {};
+  const modules = Array.isArray(indexDoc.modules) ? indexDoc.modules : [];
+  const current = modules.find(m => m.id === id);
+
+  if (version) {
+    const fileRemoved = await ghDelete(
+      env,
+      `modules/${id}-${version}.zip`,
+      `module: unpublish ${id} v${version}`
+    );
+    let indexRemoved = false;
+    if (current && String(current.version) === version) {
+      const result = await removeFromIndex(env, id);
+      if (!result.ok) {
+        return json({ ok: false, error: `file removed but index update failed: ${result.error}` }, 502);
+      }
+      indexRemoved = true;
+    }
+    if (!fileRemoved && !indexRemoved) return json({ ok: false, error: 'version not found' }, 404);
+    return json({ ok: true, id, version, fileRemoved, indexRemoved, reason });
+  }
+
+  const files = await listModuleFiles(env, id);
+  let deletedFiles = 0;
+  for (const name of files) {
+    if (await ghDelete(env, `modules/${name}`, `module: remove ${id} ${name}`)) deletedFiles += 1;
+  }
+
+  let indexRemoved = false;
+  if (current) {
+    const result = await removeFromIndex(env, id);
+    if (!result.ok) {
+      return json({ ok: false, error: `files removed but index update failed: ${result.error}` }, 502);
+    }
+    indexRemoved = true;
+  }
+  if (deletedFiles === 0 && !indexRemoved) return json({ ok: false, error: 'module not found' }, 404);
+  return json({ ok: true, id, deletedFiles, indexRemoved, reason });
+}
+
+async function listModuleFiles(env, id) {
+  const listing = await ghListDir(env, 'modules');
+  if (!Array.isArray(listing)) return [];
+  return listing
+    .filter(item => item.type === 'file' && item.name.startsWith(`${id}-`) && /\.zip$/i.test(item.name))
+    .map(item => item.name);
+}
+
+async function removeFromIndex(env, id, attempts = 3) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const indexDoc = (await ghGetJson(env, 'modules.json')) || {};
+    const modules = Array.isArray(indexDoc.modules) ? indexDoc.modules : [];
+    if (!modules.some(m => m.id === id)) return { ok: true, removed: false };
+    const next = {
+      ...indexDoc,
+      schemaVersion: indexDoc.schemaVersion || 1,
+      updatedAt: Math.floor(Date.now() / 1000),
+      modules: modules.filter(m => m.id !== id)
+    };
+    const payload = new TextEncoder().encode(JSON.stringify(next, null, 2));
+    const sha = await ghGetSha(env, 'modules.json');
+    const result = await ghPut(env, 'modules.json', {
+      message: `module: unpublish ${id}`,
+      content: toBase64(payload)
+    }, sha);
+    if (result.ok) return { ok: true, removed: true };
+    if (result.status !== 409 && result.status !== 422) {
+      return { ok: false, error: String(result.status) };
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return { ok: false, error: 'index is contended, retry later' };
+}
+
 // -- queue persistence ----------------------------------------------------
 
 async function readQueue(env) {
@@ -525,6 +657,17 @@ async function ghGetJson(env, path) {
   } catch {
     return null;
   }
+}
+
+/** Directory listings answer with a bare array, so they cannot go through ghGetText. */
+async function ghListDir(env, path) {
+  const { branch } = repoCoordinates(env);
+  const response = await fetch(`${contentsUrl(env, path)}?ref=${encodeURIComponent(branch)}`, {
+    headers: ghHeaders(env)
+  });
+  if (!response.ok) return null;
+  const body = await response.json();
+  return Array.isArray(body) ? body : null;
 }
 
 async function ghGetText(env, path) {
